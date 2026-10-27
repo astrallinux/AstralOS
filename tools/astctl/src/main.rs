@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Write};
 use std::process;
 use std::process::Command;
 
@@ -27,6 +28,15 @@ enum Commands {
         #[arg(value_name = "FILE")]
         file_path: String,
     },
+    /// Apply declared package states to the system
+    Apply {
+        /// Path to the .ast file to apply
+        #[arg(value_name = "FILE")]
+        file_path: String,
+        /// Print commands that would be run without executing them
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -45,18 +55,21 @@ fn main() {
                 process::exit(1);
             }
         }
+        Commands::Apply { file_path, dry_run } => {
+            if let Err(e) = apply_file(&file_path, dry_run) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
     }
 }
 
 fn validate_file(file_path: &str) -> Result<(), String> {
-    // Read the file
     let content = fs::read_to_string(file_path)
         .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
 
-    // Parse the content
     let blocks = parse(&content)?;
 
-    // Print success message with parsed data
     println!("✓ Successfully validated '{}'", file_path);
     println!();
     print_blocks(&blocks, 0);
@@ -65,21 +78,91 @@ fn validate_file(file_path: &str) -> Result<(), String> {
 }
 
 fn diff_file(file_path: &str) -> Result<(), String> {
-    // Read and parse the file
+    let (to_install, to_remove, correct, missing) = compute_diff(file_path)?;
+    print_diff_summary(&to_install, &to_remove, &correct, &missing);
+    Ok(())
+}
+
+fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
+    let (to_install, to_remove, correct, missing) = compute_diff(file_path)?;
+
+    if to_install.is_empty() && to_remove.is_empty() {
+        println!("No changes needed. All packages are in the correct state.");
+        return Ok(());
+    }
+
+    // Print the planned changes
+    print_diff_summary(&to_install, &to_remove, &correct, &missing);
+
+    if dry_run {
+        println!("\n\x1b[33m[DRY RUN] The following commands would be executed:\x1b[0m");
+        if !to_install.is_empty() {
+            println!("  apt-get install -y {}", to_install.join(" "));
+        }
+        if !to_remove.is_empty() {
+            println!("  apt-get remove -y {}", to_remove.join(" "));
+        }
+        println!("\n\x1b[33m[DRY RUN] No changes were made.\x1b[0m");
+        return Ok(());
+    }
+
+    // Ask for confirmation
+    print!("\nProceed with these changes? [y/N] ");
+    io::stdout().flush().map_err(|e| format!("Failed to flush stdout: {}", e))?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).map_err(|e| format!("Failed to read input: {}", e))?;
+
+    let confirmed = input.trim().eq_ignore_ascii_case("y");
+
+    if !confirmed {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    // Execute the changes
+    if !to_install.is_empty() {
+        println!("\nInstalling packages: {}", to_install.join(", "));
+        let status = Command::new("apt-get")
+            .args(["install", "-y"])
+            .args(&to_install)
+            .status()
+            .map_err(|e| format!("Failed to run apt-get install: {}", e))?;
+
+        if !status.success() {
+            return Err("apt-get install failed".to_string());
+        }
+    }
+
+    if !to_remove.is_empty() {
+        println!("\nRemoving packages: {}", to_remove.join(", "));
+        let status = Command::new("apt-get")
+            .args(["remove", "-y"])
+            .args(&to_remove)
+            .status()
+            .map_err(|e| format!("Failed to run apt-get remove: {}", e))?;
+
+        if !status.success() {
+            return Err("apt-get remove failed".to_string());
+        }
+    }
+
+    println!("\n✓ Successfully applied changes.");
+
+    Ok(())
+}
+
+fn compute_diff(file_path: &str) -> Result<(Vec<String>, Vec<String>, Vec<String>, Vec<String>), String> {
     let content = fs::read_to_string(file_path)
         .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
 
     let blocks = parse(&content)?;
-
-    // Extract packages from the PACKAGES block
     let packages = extract_packages(&blocks)?;
 
     if packages.is_empty() {
-        println!("No packages declared in '{}'", file_path);
-        return Ok(());
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
 
-    // Check system state for each package
     let mut to_install = Vec::new();
     let mut to_remove = Vec::new();
     let mut correct = Vec::new();
@@ -110,10 +193,7 @@ fn diff_file(file_path: &str) -> Result<(), String> {
         }
     }
 
-    // Print color-coded summary
-    print_diff_summary(&to_install, &to_remove, &correct, &missing);
-
-    Ok(())
+    Ok((to_install, to_remove, correct, missing))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,18 +211,14 @@ fn extract_packages(blocks: &[AstBlock]) -> Result<HashMap<String, State>, Strin
             for (key, value) in &block.entries {
                 match value {
                     AstValue::State(state) => {
-                        // Direct state: firefox = enabled
                         packages.insert(key.clone(), *state);
                     }
                     AstValue::Block(block) => {
-                        // Nested block: ffmpeg { state = enabled ... }
                         if let Some(AstValue::State(state)) = block.get("state") {
                             packages.insert(key.clone(), *state);
                         }
                     }
-                    _ => {
-                        // Ignore non-state values (like useflags, version, etc.)
-                    }
+                    _ => {}
                 }
             }
         }
@@ -161,9 +237,7 @@ fn check_package_installed(package_name: &str) -> SystemState {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 
-            // dpkg-query returns exit code 1 if package is not installed
             if !output.status.success() {
-                // Check if it's "no packages found" vs other error
                 if stderr.contains("no packages found") || stdout.trim().is_empty() {
                     SystemState::NotInstalled
                 } else {
@@ -185,7 +259,6 @@ fn print_diff_summary(
     correct: &[String],
     missing: &[String],
 ) {
-    // Green for install, Red for remove, Blue for correct, Yellow for missing
     if !to_install.is_empty() {
         println!("\x1b[32m[+] Packages to INSTALL ({}):\x1b[0m", to_install.len());
         for pkg in to_install {
