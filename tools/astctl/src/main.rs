@@ -39,6 +39,9 @@ enum Commands {
         /// Print the new .ast content without overwriting the file
         #[arg(long, short = 'n')]
         dry_run: bool,
+        /// Suppress all non-error output
+        #[arg(long, short = 'q')]
+        quiet: bool,
     },
 }
 
@@ -58,8 +61,8 @@ fn main() {
                 process::exit(1);
             }
         }
-        Commands::Sync { file_path, dry_run } => {
-            if let Err(e) = sync_file(&file_path, dry_run) {
+        Commands::Sync { file_path, dry_run, quiet } => {
+            if let Err(e) = sync_file(&file_path, dry_run, quiet) {
                 eprintln!("Error: {e}");
                 process::exit(1);
             }
@@ -158,7 +161,7 @@ fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn sync_file(file_path: &str, dry_run: bool) -> Result<(), String> {
+fn sync_file(file_path: &str, dry_run: bool, quiet: bool) -> Result<(), String> {
     // Read and parse the file
     let content = fs::read_to_string(file_path)
         .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
@@ -180,7 +183,9 @@ fn sync_file(file_path: &str, dry_run: bool) -> Result<(), String> {
     }
 
     if new_packages.is_empty() {
-        println!("No new packages to sync. All manually installed packages are already in '{}'.", file_path);
+        if !quiet {
+            println!("No new packages to sync. All manually installed packages are already in '{}'.", file_path);
+        }
         return Ok(());
     }
 
@@ -191,16 +196,20 @@ fn sync_file(file_path: &str, dry_run: bool) -> Result<(), String> {
     let new_content = serialize_blocks(&blocks);
 
     if dry_run {
-        println!("\x1b[33m[DRY RUN] The following content would be written to '{}':\x1b[0m", file_path);
-        println!();
-        println!("{}", new_content);
-        println!("\x1b[33m[DRY RUN] File was not modified.\x1b[0m");
+        if !quiet {
+            println!("\x1b[33m[DRY RUN] The following content would be written to '{}':\x1b[0m", file_path);
+            println!();
+            println!("{}", new_content);
+            println!("\x1b[33m[DRY RUN] File was not modified.\x1b[0m");
+        }
     } else {
         fs::write(file_path, new_content)
             .map_err(|e| format!("Failed to write file '{}': {}", file_path, e))?;
-        println!("✓ Synced {} new package(s) to '{}':", added_count, file_path);
-        for pkg in &new_packages {
-            println!("  + {}", pkg);
+        if !quiet {
+            println!("✓ Synced {} new package(s) to '{}':", added_count, file_path);
+            for pkg in &new_packages {
+                println!("  + {}", pkg);
+            }
         }
     }
 
