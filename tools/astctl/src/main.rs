@@ -178,11 +178,13 @@ fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
         println!("\x1b[33mWarning: {}\x1b[0m", warning);
     }
 
+    // Print the commands that will be executed (in both dry-run and normal mode)
+    println!("\n\x1b[36mThe following commands will be executed:\x1b[0m");
+    for cmd in &all_commands {
+        println!("  {}", cmd.join(" "));
+    }
+
     if dry_run {
-        println!("\n\x1b[33m[DRY RUN] The following commands would be executed:\x1b[0m");
-        for cmd in &all_commands {
-            println!("  {}", cmd.join(" "));
-        }
         println!("\n\x1b[33m[DRY RUN] No changes were made.\x1b[0m");
         return Ok(());
     }
