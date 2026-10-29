@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -161,7 +162,7 @@ fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
     warnings.extend(service_warnings);
 
     // 4. Handle PACKAGES block (with version = "latest" support)
-    let package_commands = handle_packages_block(&blocks, &to_install, &to_remove, dry_run)?;
+    let (package_commands, source_builds) = handle_packages_block(&blocks, &to_install, &to_remove, dry_run)?;
     all_commands.extend(package_commands);
 
     // Print summary
@@ -212,6 +213,11 @@ fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
         if !status.success() {
             return Err(format!("Command failed: {}", cmd.join(" ")));
         }
+    }
+
+    // Execute source builds if any
+    if !source_builds.is_empty() {
+        execute_source_builds(&source_builds)?;
     }
 
     println!("\n\x1b[32m✓ Successfully applied changes.\x1b[0m");
@@ -545,12 +551,14 @@ fn handle_packages_block(
     to_install: &[String],
     to_remove: &[String],
     _dry_run: bool,
-) -> Result<Vec<Vec<String>>, String> {
+) -> Result<(Vec<Vec<String>>, Vec<SourceBuildInfo>), String> {
     let mut commands = Vec::new();
+    let mut source_builds = Vec::new();
 
-    // Extract package details (version, build) from the PACKAGES block
+    // Extract package details (version, build, useflags) from the PACKAGES block
     let mut package_versions: HashMap<String, String> = HashMap::new();
     let mut package_builds: HashMap<String, String> = HashMap::new();
+    let mut package_useflags: HashMap<String, Vec<String>> = HashMap::new();
 
     for block in blocks {
         if block.name.to_uppercase() == "PACKAGES" {
@@ -562,6 +570,9 @@ fn handle_packages_block(
                     if let Some(AstValue::String(build)) = pkg_block.get("build") {
                         package_builds.insert(key.clone(), build.clone());
                     }
+                    if let Some(AstValue::Array(flags)) = pkg_block.get("useflags") {
+                        package_useflags.insert(key.clone(), flags.clone());
+                    }
                 }
             }
         }
@@ -569,7 +580,38 @@ fn handle_packages_block(
 
     // Handle installs
     for pkg in to_install {
-        if package_versions.get(pkg) == Some(&"latest".to_string()) {
+        let build_type = package_builds.get(pkg).cloned().unwrap_or_default();
+        let version = package_versions.get(pkg).cloned().unwrap_or_default();
+        let useflags = package_useflags.get(pkg).cloned().unwrap_or_default();
+
+        if build_type == "source" {
+            // Source build - collect info for actual execution
+            let useflags_for_display = useflags.clone();
+            source_builds.push(SourceBuildInfo {
+                package: pkg.clone(),
+                version,
+                useflags,
+            });
+
+            // For dry-run: show the sequence of commands that would be run
+            let flags_str = if useflags_for_display.is_empty() {
+                "none".to_string()
+            } else {
+                useflags_for_display.join(" ")
+            };
+            commands.push(vec!["#".to_string(), format!("=== SOURCE BUILD: {} ===", pkg)]);
+            commands.push(vec!["#".to_string(), format!("Compiling {} from source with flags: {}. This may take a while...", pkg, flags_str)]);
+            commands.push(vec!["apt-get".to_string(), "install".to_string(), "-y".to_string(), "build-essential".to_string(), "devscripts".to_string(), "dpkg-dev".to_string()]);
+            commands.push(vec!["mkdir".to_string(), "-p".to_string(), "/tmp/astralos-build".to_string()]);
+            commands.push(vec!["cd".to_string(), "/tmp/astralos-build".to_string(), "&&".to_string(), "apt-get".to_string(), "source".to_string(), pkg.clone()]);
+            if !useflags_for_display.is_empty() {
+                let flags_for_export = useflags_for_display.join(" ");
+                commands.push(vec!["#".to_string(), format!("Injecting USE flags into debian/rules: {}", flags_for_export)]);
+                commands.push(vec!["echo".to_string(), format!("export DEB_BUILD_MAINT_OPTIONS += {}", flags_for_export), ">>".to_string(), "debian/rules".to_string()]);
+            }
+            commands.push(vec!["dpkg-buildpackage".to_string(), "-us".to_string(), "-uc".to_string(), "-b".to_string()]);
+            commands.push(vec!["dpkg".to_string(), "-i".to_string(), format!("../{}_*.deb", pkg)]);
+        } else if version == "latest" {
             commands.push(vec![
                 "apt-get".to_string(),
                 "install".to_string(),
@@ -598,7 +640,117 @@ fn handle_packages_block(
         ]);
     }
 
-    Ok(commands)
+    Ok((commands, source_builds))
+}
+
+#[derive(Debug, Clone)]
+struct SourceBuildInfo {
+    package: String,
+    version: String,
+    useflags: Vec<String>,
+}
+
+fn execute_source_builds(source_builds: &[SourceBuildInfo]) -> Result<(), String> {
+    for build in source_builds {
+        let flags_str = if build.useflags.is_empty() {
+            "none".to_string()
+        } else {
+            build.useflags.join(" ")
+        };
+        println!("\x1b[34m[BUILD] Compiling {} from source with flags: {}. This may take a while...\x1b[0m", build.package, flags_str);
+
+        // Ensure build tools are installed
+        let status = Command::new("apt-get")
+            .args(["install", "-y", "build-essential", "devscripts", "dpkg-dev"])
+            .status()
+            .map_err(|e| format!("Failed to install build tools: {}", e))?;
+        if !status.success() {
+            return Err("Failed to install build tools".to_string());
+        }
+
+        // Create build directory
+        let build_dir = format!("/tmp/astralos-build/{}", build.package);
+        fs::create_dir_all(&build_dir)
+            .map_err(|e| format!("Failed to create build directory: {}", e))?;
+
+        // Download source
+        println!("\x1b[34m[BUILD] Downloading source for {}...\x1b[0m", build.package);
+        let status = Command::new("apt-get")
+            .args(["source", &build.package])
+            .current_dir(&build_dir)
+            .status()
+            .map_err(|e| format!("Failed to download source: {}", e))?;
+        if !status.success() {
+            return Err(format!("Failed to download source for {}", build.package));
+        }
+
+        // Find the source directory (apt-get source creates a directory like package-version)
+        let source_dirs: Vec<_> = fs::read_dir(&build_dir)
+            .map_err(|e| format!("Failed to read build directory: {}", e))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+
+        if source_dirs.is_empty() {
+            return Err(format!("No source directory found for {}", build.package));
+        }
+
+        let source_dir = &source_dirs[0].path();
+
+        // Inject USE flags into debian/rules
+        if !build.useflags.is_empty() {
+            let flags_for_export = build.useflags.join(" ");
+            let rules_path = source_dir.join("debian/rules");
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&rules_path)
+                .map_err(|e| format!("Failed to open debian/rules: {}", e))?;
+            use std::io::Write;
+            writeln!(file, "export DEB_BUILD_MAINT_OPTIONS += {}", flags_for_export)
+                .map_err(|e| format!("Failed to write to debian/rules: {}", e))?;
+            println!("\x1b[34m[BUILD] Injected USE flags into debian/rules: {}\x1b[0m", flags_for_export);
+        }
+
+        // Build the package
+        println!("\x1b[34m[BUILD] Building package...\x1b[0m");
+        let status = Command::new("dpkg-buildpackage")
+            .args(["-us", "-uc", "-b"])
+            .current_dir(source_dir)
+            .status()
+            .map_err(|e| format!("Failed to run dpkg-buildpackage: {}", e))?;
+        if !status.success() {
+            return Err(format!("dpkg-buildpackage failed for {}", build.package));
+        }
+
+        // Install the resulting .deb files
+        println!("\x1b[34m[BUILD] Installing built packages...\x1b[0m");
+        let parent_dir = source_dir.parent().unwrap_or(Path::new(&build_dir));
+        let deb_files: Vec<_> = fs::read_dir(parent_dir)
+            .map_err(|e| format!("Failed to read parent directory: {}", e))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("deb"))
+            .map(|e| e.path())
+            .collect();
+
+        if deb_files.is_empty() {
+            return Err(format!("No .deb files found after building {}", build.package));
+        }
+
+        for deb in deb_files {
+            let status = Command::new("dpkg")
+                .args(["-i", deb.to_str().unwrap()])
+                .status()
+                .map_err(|e| format!("Failed to install .deb: {}", e))?;
+            if !status.success() {
+                return Err(format!("Failed to install {}", deb.display()));
+            }
+        }
+
+        println!("\x1b[32m✓ Successfully built and installed {} from source\x1b[0m", build.package);
+    }
+
+    Ok(())
 }
 
 fn compute_diff_from_packages(packages: &HashMap<String, State>) -> Result<(Vec<String>, Vec<String>, Vec<String>, Vec<String>), String> {
