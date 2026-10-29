@@ -3,9 +3,13 @@ use std::fs;
 use std::io::{self, Write};
 use std::process;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ast_parser::{parse, AstBlock, AstValue, State};
 use clap::{Parser, Subcommand};
+
+const SNAPSHOT_DIR: &str = "/var/lib/astralos/snapshots";
+const MAX_SNAPSHOTS: usize = 10;
 
 #[derive(Parser)]
 #[command(name = "astctl", version, about = "AST configuration tool")]
@@ -43,6 +47,15 @@ enum Commands {
         #[arg(long, short = 'q')]
         quiet: bool,
     },
+    /// Rollback to the most recent snapshot
+    Rollback {
+        /// Path to the .ast file to rollback
+        #[arg(value_name = "FILE")]
+        file_path: String,
+        /// Print commands that would be run without executing them
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -63,6 +76,12 @@ fn main() {
         }
         Commands::Sync { file_path, dry_run, quiet } => {
             if let Err(e) = sync_file(&file_path, dry_run, quiet) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        Commands::Rollback { file_path, dry_run } => {
+            if let Err(e) = rollback_file(&file_path, dry_run) {
                 eprintln!("Error: {e}");
                 process::exit(1);
             }
@@ -167,6 +186,9 @@ fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
         return Ok(());
     }
 
+    // Create snapshot before making changes
+    create_snapshot(file_path)?;
+
     // Execute all commands
     for cmd in &all_commands {
         let status = Command::new(&cmd[0])
@@ -180,6 +202,100 @@ fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
     }
 
     println!("\n\x1b[32m✓ Successfully applied changes.\x1b[0m");
+
+    Ok(())
+}
+
+fn create_snapshot(file_path: &str) -> Result<(), String> {
+    // Create snapshot directory
+    fs::create_dir_all(SNAPSHOT_DIR)
+        .map_err(|e| format!("Failed to create snapshot directory '{}': {}", SNAPSHOT_DIR, e))?;
+
+    // Generate timestamp
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("Failed to get current time: {}", e))?;
+    let timestamp = now.as_secs();
+    let datetime = chrono::DateTime::<chrono::Local>::from(chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp as i64, 0).unwrap());
+    let timestamp_str = datetime.format("%Y-%m-%d-%H-%M-%S").to_string();
+
+    let snapshot_path = format!("{}/{}.ast", SNAPSHOT_DIR, timestamp_str);
+
+    // Copy the current .ast file to snapshot
+    fs::copy(file_path, &snapshot_path)
+        .map_err(|e| format!("Failed to create snapshot '{}': {}", snapshot_path, e))?;
+
+    // Clean up old snapshots (keep only last 10)
+    cleanup_old_snapshots()?;
+
+    println!("\n\x1b[34m[SNAPSHOT] Created: {}\x1b[0m", snapshot_path);
+
+    Ok(())
+}
+
+fn cleanup_old_snapshots() -> Result<(), String> {
+    let mut snapshots: Vec<_> = fs::read_dir(SNAPSHOT_DIR)
+        .map_err(|e| format!("Failed to read snapshot directory: {}", e))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("ast"))
+        .collect();
+
+    // Sort by modification time (newest first)
+    snapshots.sort_by(|a, b| {
+        let a_time = a.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+        let b_time = b.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+        b_time.cmp(&a_time)
+    });
+
+    // Remove old snapshots beyond MAX_SNAPSHOTS
+    for snapshot in snapshots.iter().skip(MAX_SNAPSHOTS) {
+        let _ = fs::remove_file(snapshot.path());
+    }
+
+    Ok(())
+}
+
+fn rollback_file(file_path: &str, dry_run: bool) -> Result<(), String> {
+    // Find the most recent snapshot
+    let mut snapshots: Vec<_> = fs::read_dir(SNAPSHOT_DIR)
+        .map_err(|e| format!("Failed to read snapshot directory '{}': {}", SNAPSHOT_DIR, e))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("ast"))
+        .collect();
+
+    if snapshots.is_empty() {
+        return Err("No snapshots found in /var/lib/astralos/snapshots/".to_string());
+    }
+
+    // Sort by modification time (newest first)
+    snapshots.sort_by(|a, b| {
+        let a_time = a.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+        let b_time = b.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+        b_time.cmp(&a_time)
+    });
+
+    let latest_snapshot = &snapshots[0];
+    let snapshot_path = latest_snapshot.path();
+
+    println!("\x1b[34m[ROLLBACK] Using snapshot: {}\x1b[0m", snapshot_path.display());
+
+    if dry_run {
+        println!("\n\x1b[33m[DRY RUN] The following actions would be performed:\x1b[0m");
+        println!("  cp {} {}", snapshot_path.display(), file_path);
+        println!("  astctl apply {} --dry-run", file_path);
+        println!("\n\x1b[33m[DRY RUN] No changes were made.\x1b[0m");
+        return Ok(());
+    }
+
+    // Copy snapshot back to original file
+    fs::copy(&snapshot_path, file_path)
+        .map_err(|e| format!("Failed to restore snapshot: {}", e))?;
+
+    println!("\x1b[32m✓ Restored {} from snapshot\x1b[0m", file_path);
+
+    // Apply the restored file
+    println!("\n\x1b[34m[ROLLBACK] Applying restored configuration...\x1b[0m");
+    apply_file(file_path, false)?;
 
     Ok(())
 }
