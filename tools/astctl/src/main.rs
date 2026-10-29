@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 
 const SNAPSHOT_DIR: &str = "/var/lib/astralos/snapshots";
 const MAX_SNAPSHOTS: usize = 10;
+const CLEAN_MAX_SNAPSHOTS: usize = 5;
 
 #[derive(Parser)]
 #[command(name = "astctl", version, about = "AST configuration tool")]
@@ -56,6 +57,12 @@ enum Commands {
         #[arg(long, short = 'n')]
         dry_run: bool,
     },
+    /// Clean up old snapshots and orphaned packages
+    Clean {
+        /// Print commands that would be run without executing them
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -82,6 +89,12 @@ fn main() {
         }
         Commands::Rollback { file_path, dry_run } => {
             if let Err(e) = rollback_file(&file_path, dry_run) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        Commands::Clean { dry_run } => {
+            if let Err(e) = clean_file(dry_run) {
                 eprintln!("Error: {e}");
                 process::exit(1);
             }
@@ -297,6 +310,74 @@ fn rollback_file(file_path: &str, dry_run: bool) -> Result<(), String> {
     println!("\n\x1b[34m[ROLLBACK] Applying restored configuration...\x1b[0m");
     apply_file(file_path, false)?;
 
+    Ok(())
+}
+
+fn clean_file(dry_run: bool) -> Result<(), String> {
+    println!("\x1b[34m[CLEAN] Starting cleanup...\x1b[0m");
+
+    // 1. Clean up old snapshots (keep only 5 most recent)
+    let mut snapshots: Vec<_> = fs::read_dir(SNAPSHOT_DIR)
+        .map_err(|e| format!("Failed to read snapshot directory '{}': {}", SNAPSHOT_DIR, e))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("ast"))
+        .collect();
+
+    if snapshots.is_empty() {
+        println!("  No snapshots found in {}", SNAPSHOT_DIR);
+    } else {
+        // Sort by modification time (newest first)
+        snapshots.sort_by(|a, b| {
+            let a_time = a.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            let b_time = b.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            b_time.cmp(&a_time)
+        });
+
+        let total_snapshots = snapshots.len();
+        let to_delete = if total_snapshots > CLEAN_MAX_SNAPSHOTS {
+            total_snapshots - CLEAN_MAX_SNAPSHOTS
+        } else {
+            0
+        };
+
+        if to_delete > 0 {
+            if dry_run {
+                println!("\x1b[33m[DRY RUN] Would delete {} old snapshot(s):\x1b[0m", to_delete);
+                for snapshot in snapshots.iter().skip(CLEAN_MAX_SNAPSHOTS) {
+                    println!("  {}", snapshot.path().display());
+                }
+            } else {
+                let mut deleted = 0;
+                for snapshot in snapshots.iter().skip(CLEAN_MAX_SNAPSHOTS) {
+                    if fs::remove_file(snapshot.path()).is_ok() {
+                        deleted += 1;
+                    }
+                }
+                println!("\x1b[32m✓ Deleted {} old snapshot(s), {} remaining\x1b[0m", deleted, CLEAN_MAX_SNAPSHOTS);
+            }
+        } else {
+            println!("\x1b[32m✓ No old snapshots to delete ({} of {} max)\x1b[0m", total_snapshots, CLEAN_MAX_SNAPSHOTS);
+        }
+    }
+
+    // 2. Clean up orphaned packages
+    if dry_run {
+        println!("\x1b[33m[DRY RUN] Would run: apt-get autoremove -y\x1b[0m");
+    } else {
+        println!("\x1b[34m[CLEAN] Running apt-get autoremove -y...\x1b[0m");
+        let status = Command::new("apt-get")
+            .args(["autoremove", "-y"])
+            .status()
+            .map_err(|e| format!("Failed to run apt-get autoremove: {}", e))?;
+
+        if status.success() {
+            println!("\x1b[32m✓ Package cleanup completed\x1b[0m");
+        } else {
+            eprintln!("\x1b[31mWarning: apt-get autoremove exited with non-zero status\x1b[0m");
+        }
+    }
+
+    println!("\x1b[32m✓ Cleanup completed\x1b[0m");
     Ok(())
 }
 
