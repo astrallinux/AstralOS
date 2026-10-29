@@ -71,7 +71,12 @@ fn main() {
 }
 
 fn diff_file(file_path: &str) -> Result<(), String> {
-    let (to_install, to_remove, correct, missing) = compute_diff(file_path)?;
+    let content = fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
+
+    let blocks = parse(&content)?;
+    let packages = extract_packages(&blocks)?;
+    let (to_install, to_remove, correct, missing) = compute_diff_from_packages(&packages)?;
 
     // If nothing to do, print short message
     if to_install.is_empty() && to_remove.is_empty() && missing.is_empty() {
@@ -84,7 +89,15 @@ fn diff_file(file_path: &str) -> Result<(), String> {
 }
 
 fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
-    let (to_install, to_remove, correct, missing) = compute_diff(file_path)?;
+    // Read and parse the entire file
+    let content = fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
+
+    let blocks = parse(&content)?;
+
+    // Extract packages for the existing diff logic
+    let packages = extract_packages(&blocks)?;
+    let (to_install, to_remove, correct, missing) = compute_diff_from_packages(&packages)?;
 
     // Check for Unknown packages - we can't proceed if system state is unknown
     if !missing.is_empty() {
@@ -97,21 +110,45 @@ fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
         return Err("Unknown package state prevents safe apply".to_string());
     }
 
-    // If nothing to do, print short message
-    if to_install.is_empty() && to_remove.is_empty() {
+    // Collect all commands to run
+    let mut all_commands: Vec<Vec<String>> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 1. Handle SYSTEM block
+    let system_commands = handle_system_block(&blocks, dry_run)?;
+    all_commands.extend(system_commands);
+
+    // 2. Handle USERS block
+    let (user_commands, user_warnings) = handle_users_block(&blocks, dry_run)?;
+    all_commands.extend(user_commands);
+    warnings.extend(user_warnings);
+
+    // 3. Handle SERVICES block
+    let (service_commands, service_warnings) = handle_services_block(&blocks, dry_run)?;
+    all_commands.extend(service_commands);
+    warnings.extend(service_warnings);
+
+    // 4. Handle PACKAGES block (with version = "latest" support)
+    let package_commands = handle_packages_block(&blocks, &to_install, &to_remove, dry_run)?;
+    all_commands.extend(package_commands);
+
+    // Print summary
+    if to_install.is_empty() && to_remove.is_empty() && all_commands.is_empty() && warnings.is_empty() {
         println!("\x1b[32m✓ System is up to date. No changes needed.\x1b[0m");
         return Ok(());
     }
 
     print_diff_summary(&to_install, &to_remove, &correct, &missing);
 
+    // Print warnings
+    for warning in &warnings {
+        println!("\x1b[33mWarning: {}\x1b[0m", warning);
+    }
+
     if dry_run {
         println!("\n\x1b[33m[DRY RUN] The following commands would be executed:\x1b[0m");
-        if !to_install.is_empty() {
-            println!("  apt-get install -y {}", to_install.join(" "));
-        }
-        if !to_remove.is_empty() {
-            println!("  apt-get remove -y {}", to_remove.join(" "));
+        for cmd in &all_commands {
+            println!("  {}", cmd.join(" "));
         }
         println!("\n\x1b[33m[DRY RUN] No changes were made.\x1b[0m");
         return Ok(());
@@ -130,35 +167,275 @@ fn apply_file(file_path: &str, dry_run: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    if !to_install.is_empty() {
-        println!("\nInstalling packages: {}", to_install.join(", "));
-        let status = Command::new("apt-get")
-            .args(["install", "-y"])
-            .args(&to_install)
+    // Execute all commands
+    for cmd in &all_commands {
+        let status = Command::new(&cmd[0])
+            .args(&cmd[1..])
             .status()
-            .map_err(|e| format!("Failed to run apt-get install: {}", e))?;
+            .map_err(|e| format!("Failed to run '{}': {}", cmd.join(" "), e))?;
 
         if !status.success() {
-            return Err("apt-get install failed".to_string());
-        }
-    }
-
-    if !to_remove.is_empty() {
-        println!("\nRemoving packages: {}", to_remove.join(", "));
-        let status = Command::new("apt-get")
-            .args(["remove", "-y"])
-            .args(&to_remove)
-            .status()
-            .map_err(|e| format!("Failed to run apt-get remove: {}", e))?;
-
-        if !status.success() {
-            return Err("apt-get remove failed".to_string());
+            return Err(format!("Command failed: {}", cmd.join(" ")));
         }
     }
 
     println!("\n\x1b[32m✓ Successfully applied changes.\x1b[0m");
 
     Ok(())
+}
+
+fn handle_system_block(blocks: &[AstBlock], _dry_run: bool) -> Result<Vec<Vec<String>>, String> {
+    let mut commands = Vec::new();
+
+    for block in blocks {
+        if block.name.to_uppercase() == "SYSTEM" {
+            // Handle hostname
+            if let Some(AstValue::String(hostname)) = block.get("hostname") {
+                // Try hostnamectl first, fallback to /etc/hostname
+                if command_exists("hostnamectl") {
+                    commands.push(vec!["hostnamectl".to_string(), "set-hostname".to_string(), hostname.clone()]);
+                } else {
+                    commands.push(vec!["sh".to_string(), "-c".to_string(), format!("echo {} > /etc/hostname", hostname)]);
+                }
+            }
+
+            // Handle timezone
+            if let Some(AstValue::String(timezone)) = block.get("timezone") {
+                if command_exists("timedatectl") {
+                    commands.push(vec!["timedatectl".to_string(), "set-timezone".to_string(), timezone.clone()]);
+                }
+            }
+        }
+    }
+
+    Ok(commands)
+}
+
+fn handle_users_block(blocks: &[AstBlock], _dry_run: bool) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
+    let mut commands = Vec::new();
+    let warnings = Vec::new();
+
+    for block in blocks {
+        if block.name.to_uppercase() == "USERS" {
+            for (username, value) in &block.entries {
+                if let AstValue::Block(user_block) = value {
+                    // Create user if doesn't exist
+                    commands.push(vec!["useradd".to_string(), "-m".to_string(), username.clone()]);
+
+                    // Handle groups
+                    if let Some(AstValue::Array(groups)) = user_block.get("groups") {
+                        for group in groups {
+                            commands.push(vec!["usermod".to_string(), "-aG".to_string(), group.clone(), username.clone()]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((commands, warnings))
+}
+
+fn handle_services_block(blocks: &[AstBlock], _dry_run: bool) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
+    let mut commands = Vec::new();
+    let mut warnings = Vec::new();
+
+    // Discover current system services
+    let system_services = discover_services()?;
+
+    for block in blocks {
+        if block.name.to_uppercase() == "SERVICES" {
+            for (service_name, value) in &block.entries {
+                // Check if service exists on system
+                if !system_services.contains_key(service_name) {
+                    warnings.push(format!("Service '{}' not found on system", service_name));
+                    continue;
+                }
+
+                let is_running = system_services[service_name];
+
+                match value {
+                    AstValue::State(State::Enabled) => {
+                        if !is_running {
+                            // Enable and start service
+                            commands.push(vec!["rc-update".to_string(), "add".to_string(), service_name.clone(), "default".to_string()]);
+                            commands.push(vec!["service".to_string(), service_name.clone(), "start".to_string()]);
+                        }
+                    }
+                    AstValue::State(State::Disabled) => {
+                        if is_running {
+                            // Stop and disable service
+                            commands.push(vec!["service".to_string(), service_name.clone(), "stop".to_string()]);
+                            commands.push(vec!["rc-update".to_string(), "del".to_string(), service_name.clone(), "default".to_string()]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok((commands, warnings))
+}
+
+fn discover_services() -> Result<HashMap<String, bool>, String> {
+    let mut services = HashMap::new();
+
+    // Try rc-status first (OpenRC)
+    if let Ok(output) = Command::new("rc-status").args(["--all", "--format", "{{name}} {{status}}"]).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let name = parts[0].to_string();
+                    let status = parts[1].to_string();
+                    services.insert(name, status == "started");
+                }
+            }
+            return Ok(services);
+        }
+    }
+
+    // Try service --status-all (SysV)
+    if let Ok(output) = Command::new("service").args(["--status-all"]).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                // Format: [ + ]  service_name
+                if line.contains("[ + ]") || line.contains("[ - ]") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        let name = parts[2].to_string();
+                        let running = line.contains("[ + ]");
+                        services.insert(name, running);
+                    }
+                }
+            }
+            return Ok(services);
+        }
+    }
+
+    // Fallback: check /etc/rc*.d/ for symlinks
+    if let Ok(entries) = fs::read_dir("/etc") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("rc") && name.ends_with(".d") {
+                        if let Ok(entries) = fs::read_dir(&path) {
+                            for entry in entries.flatten() {
+                                if let Some(svc_name) = entry.file_name().to_str() {
+                                    // Symlinks like S01service or K01service
+                                    if svc_name.starts_with('S') || svc_name.starts_with('K') {
+                                        let service_name = &svc_name[3..]; // Skip S01 or K01
+                                        services.insert(service_name.to_string(), svc_name.starts_with('S'));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(services)
+}
+
+fn handle_packages_block(
+    blocks: &[AstBlock],
+    to_install: &[String],
+    to_remove: &[String],
+    _dry_run: bool,
+) -> Result<Vec<Vec<String>>, String> {
+    let mut commands = Vec::new();
+
+    // Extract package details (version, build) from the PACKAGES block
+    let mut package_versions: HashMap<String, String> = HashMap::new();
+    let mut package_builds: HashMap<String, String> = HashMap::new();
+
+    for block in blocks {
+        if block.name.to_uppercase() == "PACKAGES" {
+            for (key, value) in &block.entries {
+                if let AstValue::Block(pkg_block) = value {
+                    if let Some(AstValue::String(version)) = pkg_block.get("version") {
+                        package_versions.insert(key.clone(), version.clone());
+                    }
+                    if let Some(AstValue::String(build)) = pkg_block.get("build") {
+                        package_builds.insert(key.clone(), build.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Handle installs
+    for pkg in to_install {
+        if package_versions.get(pkg) == Some(&"latest".to_string()) {
+            commands.push(vec![
+                "apt-get".to_string(),
+                "install".to_string(),
+                "-t".to_string(),
+                "daedalus-backports".to_string(),
+                "-y".to_string(),
+                pkg.clone(),
+            ]);
+        } else {
+            commands.push(vec![
+                "apt-get".to_string(),
+                "install".to_string(),
+                "-y".to_string(),
+                pkg.clone(),
+            ]);
+        }
+    }
+
+    // Handle removals
+    for pkg in to_remove {
+        commands.push(vec![
+            "apt-get".to_string(),
+            "remove".to_string(),
+            "-y".to_string(),
+            pkg.clone(),
+        ]);
+    }
+
+    Ok(commands)
+}
+
+fn compute_diff_from_packages(packages: &HashMap<String, State>) -> Result<(Vec<String>, Vec<String>, Vec<String>, Vec<String>), String> {
+    let mut to_install = Vec::new();
+    let mut to_remove = Vec::new();
+    let mut correct = Vec::new();
+    let mut missing = Vec::new();
+
+    for (name, declared_state) in packages {
+        let system_state = check_package_installed(name);
+
+        match (declared_state, system_state) {
+            (State::Enabled, SystemState::Installed) => {
+                correct.push(name.clone());
+            }
+            (State::Enabled, SystemState::NotInstalled) => {
+                to_install.push(name.clone());
+            }
+            (State::Enabled, SystemState::Unknown) => {
+                missing.push(name.clone());
+            }
+            (State::Disabled, SystemState::Installed) => {
+                to_remove.push(name.clone());
+            }
+            (State::Disabled, SystemState::NotInstalled) => {
+                correct.push(name.clone());
+            }
+            (State::Disabled, SystemState::Unknown) => {
+                missing.push(name.clone());
+            }
+        }
+    }
+
+    Ok((to_install, to_remove, correct, missing))
 }
 
 fn sync_file(file_path: &str, dry_run: bool, quiet: bool) -> Result<(), String> {
@@ -256,12 +533,9 @@ fn get_manual_packages() -> Result<Vec<String>, String> {
         }
         _ => {
             // Fallback: try reading /var/log/apt/history.log
-            // This is more complex, so we'll just return empty for now
-            // In a real implementation, you'd parse the history log
         }
     }
 
-    // If both fail, return empty (will be handled as Unknown in dry-run)
     Err("Could not determine manually installed packages".to_string())
 }
 
@@ -346,57 +620,6 @@ fn serialize_entry(key: &str, value: &AstValue, indent: usize, output: &mut Stri
     }
 }
 
-fn compute_diff(file_path: &str) -> Result<(Vec<String>, Vec<String>, Vec<String>, Vec<String>), String> {
-    let content = fs::read_to_string(file_path)
-        .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
-
-    let blocks = parse(&content)?;
-    let packages = extract_packages(&blocks)?;
-
-    if packages.is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
-    }
-
-    let mut to_install = Vec::new();
-    let mut to_remove = Vec::new();
-    let mut correct = Vec::new();
-    let mut missing = Vec::new();
-
-    for (name, declared_state) in packages {
-        let system_state = check_package_installed(&name);
-
-        match (declared_state, system_state) {
-            (State::Enabled, SystemState::Installed) => {
-                correct.push(name);
-            }
-            (State::Enabled, SystemState::NotInstalled) => {
-                to_install.push(name);
-            }
-            (State::Enabled, SystemState::Unknown) => {
-                missing.push(name);
-            }
-            (State::Disabled, SystemState::Installed) => {
-                to_remove.push(name);
-            }
-            (State::Disabled, SystemState::NotInstalled) => {
-                correct.push(name);
-            }
-            (State::Disabled, SystemState::Unknown) => {
-                missing.push(name);
-            }
-        }
-    }
-
-    Ok((to_install, to_remove, correct, missing))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SystemState {
-    Installed,
-    NotInstalled,
-    Unknown,
-}
-
 fn extract_packages(blocks: &[AstBlock]) -> Result<HashMap<String, State>, String> {
     let mut packages = HashMap::new();
 
@@ -445,6 +668,14 @@ fn check_package_installed(package_name: &str) -> SystemState {
         }
         Err(_) => SystemState::Unknown,
     }
+}
+
+fn command_exists(cmd: &str) -> bool {
+    Command::new("which")
+        .arg(cmd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn print_diff_summary(
@@ -497,4 +728,11 @@ fn escape_string(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\t', "\\t")
         .replace('\r', "\\r")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemState {
+    Installed,
+    NotInstalled,
+    Unknown,
 }
