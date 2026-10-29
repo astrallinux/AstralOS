@@ -204,16 +204,16 @@ impl AstParser {
         Ok(AstValue::String(ident))
     }
 
-    /// Parse an identifier (alphanumeric and underscore, can start with digit).
+    /// Parse an identifier (alphanumeric, underscore, and hyphen, can start with digit).
     fn parse_identifier(&mut self) -> Result<String, String> {
         self.skip_whitespace_and_comments();
 
-        if self.is_at_end() || (!self.current_char().is_alphanumeric() && self.current_char() != '_') {
+        if self.is_at_end() || (!self.current_char().is_alphanumeric() && self.current_char() != '_' && self.current_char() != '-') {
             return Err(self.error("Expected identifier"));
         }
 
         let mut ident = String::new();
-        while !self.is_at_end() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+        while !self.is_at_end() && (self.current_char().is_alphanumeric() || self.current_char() == '_' || self.current_char() == '-') {
             ident.push(self.advance());
         }
 
