@@ -10,3 +10,7 @@ cargo
 python3
 git
 gdb
+calamares
+calamares-settings-debian
+xorg
+sddm
