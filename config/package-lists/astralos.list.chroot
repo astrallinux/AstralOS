@@ -1,0 +1,12 @@
+linux-image-amd64
+sudo
+nano
+curl
+wget
+build-essential
+gcc
+rustc
+cargo
+python3
+git
+gdb
