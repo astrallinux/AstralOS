@@ -1,0 +1,5 @@
+NAME="AstralOS"
+PRETTY_NAME="AstralOS"
+ID=astralos
+ID_LIKE=debian
+HOME_URL="https://github.com/astrallinux/AstralOS"

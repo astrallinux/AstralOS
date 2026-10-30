@@ -1,0 +1,7 @@
+Origin: AstralOS
+Label: AstralOS
+Suite: stable
+Codename: bookworm
+Architectures: amd64
+Components: main
+Description: AstralOS official packages

@@ -1,0 +1,24 @@
+Origin: AstralOS
+Label: AstralOS
+Suite: stable
+Codename: bookworm
+Date: Fri, 30 Oct 2026 00:04:52 UTC
+Architectures: amd64
+Components: main
+Description: AstralOS official packages
+MD5Sum:
+ cee6b7ea2751c818d10715256d7ec90b 580 main/binary-amd64/Packages
+ 7af253eaf13f34c4898186837bb37615 10240 main/binary-amd64/Packages.gz
+ d38e1d7349976dcccd3aadbf67f053c3 125 main/binary-amd64/Release
+SHA1:
+ d4f96ab53bcd27f796f12191c2376ef446677ed4 580 main/binary-amd64/Packages
+ 843a9b2f91daee20d0d2f5253d07fd5de59635e4 10240 main/binary-amd64/Packages.gz
+ 4ed943e1adcc7815b44c1621cf681c5c2013b8c8 125 main/binary-amd64/Release
+SHA256:
+ 3080739afffede94a96426b153e4218431b4f09930459386f3093a20aa5818f1 580 main/binary-amd64/Packages
+ cda464f10e680a82f2f6e2a91b9a21d3aaa85972859d2dc7059063e3a1b44272 10240 main/binary-amd64/Packages.gz
+ 1360091ae72b127071495dc1226c532a0fc05e78278e730f871282a18d695c7d 125 main/binary-amd64/Release
+SHA512:
+ 9e9e1fad9b55e74a6d20222911eaa0221e890c2ac741f93271fb583bb7ce697396498823cdc886d0581885e1548e1860a1b1e2b8df7e9954821ceda98bbdfe19 580 main/binary-amd64/Packages
+ 4c318035d6e594eeb37bc823e075c8f1098dd5d93fcdac8cdf6247a511874455719a9232cf461a26ee525716b1f8fab349d4ff794a945cd82f5800a0d73a827e 10240 main/binary-amd64/Packages.gz
+ 7fecc2d76aae4719f1d8d4d56a5bfe6a6406059605d9e0e90fa9b0a736d34b08ed5bbf02250989efd493f086e7b7bdb835eaee14abe4bbfd74244be291cd77eb 125 main/binary-amd64/Release

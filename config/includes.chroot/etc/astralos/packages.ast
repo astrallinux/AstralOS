@@ -1,0 +1,85 @@
+# Sample .ast configuration file with all supported blocks
+
+# System configuration block
+SYSTEM {
+    hostname = "astral-pc"
+    timezone = "UTC"
+    locale = "en_US.UTF-8"
+    kernel = "linux-lts"
+}
+
+# Users configuration block with nested user blocks
+USERS {
+    astral {
+        groups = ["wheel", "audio", "video", "docker"]
+        shell = "/bin/zsh"
+        uid = 1000
+    }
+    root {
+        groups = ["wheel"]
+        shell = "/bin/bash"
+        uid = 0
+    }
+    builder {
+        groups = ["wheel", "docker"]
+        shell = "/bin/bash"
+        uid = 1001
+    }
+}
+
+# Services configuration block
+SERVICES {
+    NetworkManager = enabled
+    sshd = enabled
+    docker = enabled
+    bluetooth = disabled
+    cups = disabled
+    avahi-daemon = disabled
+}
+
+# Packages block with existing and new keys
+PACKAGES {
+    firefox = enabled
+    ffmpeg {
+        state = enabled
+        useflags = ["nvenc", "x265"]
+        version = "latest"
+    }
+    vim {
+        state = disabled
+        useflags = ["lua", "python3"]
+        version = "9.1"
+    }
+    kernel {
+        state = enabled
+        version = "6.6"
+        modules = ["nvidia", "vboxdrv"]
+    }
+    gcc {
+        state = enabled
+        build = "source"
+        version = "13.2"
+        useflags = ["graphite", "lto"]
+    }
+    rust {
+        state = enabled
+        build = "source"
+        version = "latest"
+        useflags = ["rustfmt", "clippy"]
+    }
+    docker {
+        state = enabled
+        version = "latest"
+    }
+    networkmanager {
+        state = enabled
+        version = "1.48"
+    }
+}
+
+# Repositories block
+REPOS {
+    gentoo = enabled
+    local = disabled
+    priority = 100
+}

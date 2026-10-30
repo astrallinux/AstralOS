@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "astctl",
+    "ast-parser",
+]
+resolver = "2"

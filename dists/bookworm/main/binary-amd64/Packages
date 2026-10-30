@@ -1,0 +1,16 @@
+Package: astctl
+Version: 0.1.0-1
+Architecture: amd64
+Maintainer: Astral <shineynezar@gmail.com>
+Installed-Size: 1131
+Depends: libc6
+Priority: optional
+Section: utils
+Filename: pool/main/a/astctl/astctl_0.1.0-1_amd64.deb
+Size: 405968
+SHA512: 1316b3536bf6803abb8836cf5a2578a60560670cad7c4289fec9a705b837c184d2125fcf20d48c165d8f30a03447c40fa4553e7a1205d3acf94bcb876704178c
+SHA256: 1533c13ea50ab181e91396e971e4c45a2acfb06ca5fd2b60491362edfaca080b
+SHA1: d82ac932c7bf07cb9ceb6205abc77bb72483944f
+MD5sum: 585346b9edf220e5da24e876e27b6f14
+Description: [generated from Rust crate astctl]
+

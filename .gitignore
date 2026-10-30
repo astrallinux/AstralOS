@@ -1,0 +1,33 @@
+# ==========================================
+# Rust (tools directory)
+# ==========================================
+target/
+**/*.rs.bk
+Cargo.lock
+
+# ==========================================
+# live-build (ISO Builder)
+# ==========================================
+# The final generated ISO
+*.iso
+*.img
+
+# Build directories created by live-build
+binary/
+chroot/
+cache/
+local/
+config/binary
+config/bootstrap
+config/chroot
+config/common
+config/source
+
+# ==========================================
+# System and Editor files
+# ==========================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

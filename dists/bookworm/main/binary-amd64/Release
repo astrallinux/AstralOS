@@ -1,0 +1,6 @@
+Archive: stable
+Component: main
+Origin: AstralOS
+Label: AstralOS
+Architecture: amd64
+Description: AstralOS official packages
