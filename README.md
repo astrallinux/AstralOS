@@ -21,8 +21,7 @@ astctl is designed with safety-critical logic in mind. If it cannot verify the s
 ## Building from Source
 To build the AstralOS ISO, you need a Debian/Devuan environment with live-build installed.
 
-# Build the ISO
-sudo lb build
+    sudo lb build
 
 The resulting image will be generated as live-image-amd64.hybrid.iso.
 
