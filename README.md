@@ -31,7 +31,7 @@ The resulting image will be generated as live-image-amd64.hybrid.iso.
 - [x] Integrate live-build and custom branding (ASCII art, OS release).
 - [x] Implement Calamares graphical installer and DE selection.
 - [x] Implement USE flag source compilation pipeline.
-- [ ] Finalize automated APT hook for seamless packages.ast logging.
+- [x] Finalize automated APT hook for seamless packages.ast logging.
 
 ## License
 MIT License
